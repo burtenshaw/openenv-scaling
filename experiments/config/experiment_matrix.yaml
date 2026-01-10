@@ -1,0 +1,162 @@
+# OpenEnv Scaling Experiment Configuration
+# =========================================
+# Defines the full experiment matrix for infrastructure scaling tests
+
+experiment:
+  name: "openenv-scaling-benchmark"
+  version: "1.0"
+  description: "Measure maximum batch size across infrastructure deployments"
+
+# Success criteria for determining if a configuration passes
+success_criteria:
+  min_success_rate: 0.95  # 95% success rate required
+  max_latency_multiplier: 2.0  # p99 < 2 × (wait_seconds + overhead)
+  overhead_seconds: 0.5  # Estimated connection/reset overhead
+
+# Independent variables
+variables:
+  # Infrastructure deployments to test
+  infrastructures:
+    - id: local-uvicorn
+      name: "Local Uvicorn"
+      deploy_script: "./deploy/local/run_uvicorn.sh"
+      url_template: "http://localhost:8000"
+      env_vars:
+        WORKERS: 4
+        MAX_CONCURRENT_ENVS: 100
+      max_expected_batch: 128
+      
+    - id: local-docker
+      name: "Local Docker"
+      deploy_script: "./deploy/local/run_docker.sh"
+      url_template: "http://localhost:8000"
+      env_vars:
+        WORKERS: 4
+      max_expected_batch: 128
+      
+    - id: hf-spaces
+      name: "Hugging Face Spaces"
+      deploy_script: "./deploy/hf_spaces/deploy.sh"
+      url_template: "https://${HF_USER}-openenv-benchmark.hf.space"
+      env_vars: {}
+      max_expected_batch: 32  # HF Spaces has lower limits
+      notes: "Free tier may timeout; consider upgrading for large tests"
+      
+    - id: slurm-single
+      name: "SLURM Single Node"
+      deploy_script: "sbatch deploy/slurm/serve_single.sh"
+      url_template: "http://${SLURM_NODE_IP}:8000"
+      env_vars:
+        SLURM_CPUS_PER_TASK: 64
+      max_expected_batch: 256
+      
+    - id: slurm-multi
+      name: "SLURM Multi-Node (Envoy)"
+      deploy_script: "./deploy/slurm/alloc.sh && ./deploy/slurm/serve_multi.sh"
+      url_template: "${OPENENV_URL}"  # From openenv-connection.env
+      env_vars:
+        WORKERS: 4
+        NODES: 4
+      max_expected_batch: 512
+
+  # Communication protocols
+  modes:
+    - http
+    - ws
+
+  # Simulated workload durations (seconds)
+  wait_seconds:
+    - 0.1   # Light workload - tests connection overhead
+    - 1.0   # Medium workload - typical use case
+    - 5.0   # Heavy workload - tests sustained concurrency
+
+  # Concurrent request counts (batch sizes) - exponential sweep
+  batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+
+# Test execution parameters
+execution:
+  repetitions: 3  # Number of times to repeat each configuration
+  timeout_seconds: 120  # Per-request timeout
+  cooldown_seconds: 1.0  # Pause between runs
+  
+# Output configuration
+output:
+  base_dir: "experiments/results"
+  raw_file: "raw.jsonl"
+  summary_file: "summary.csv"
+  log_file: "experiments/reports/EXPERIMENT_LOG.md"
+
+# Dependent variables to measure
+metrics:
+  primary:
+    - success_rate
+    - total_wall_time
+    - effective_concurrency
+    - requests_per_second
+  
+  latency_percentiles:
+    - p50
+    - p90
+    - p95
+    - p99
+  
+  latency_breakdown:
+    - connect_latency  # WebSocket only
+    - reset_latency
+    - step_latency
+    - total_latency
+  
+  distribution:
+    - unique_pids
+    - unique_sessions
+    - unique_hosts
+
+# Planned analyses
+analyses:
+  tables:
+    - name: "max_batch_by_infrastructure"
+      description: "Maximum batch size achieving >=95% success per infrastructure"
+      
+    - name: "protocol_comparison"
+      description: "HTTP vs WebSocket throughput comparison"
+      
+    - name: "latency_breakdown"
+      description: "Latency components at maximum load"
+
+  figures:
+    - name: "max_batch_bar_chart"
+      type: "bar"
+      x: "infrastructure"
+      y: "max_batch_size"
+      hue: "mode"
+      facet: "wait_seconds"
+      
+    - name: "scaling_curves"
+      type: "line"
+      x: "batch_size"
+      y: "success_rate"
+      hue: "infrastructure"
+      facet: "wait_seconds"
+      
+    - name: "protocol_comparison"
+      type: "grouped_bar"
+      x: "infrastructure"
+      y: "max_batch_size"
+      hue: "mode"
+      
+    - name: "latency_heatmap"
+      type: "heatmap"
+      x: "batch_size"
+      y: "infrastructure"
+      value: "total_p99"
+

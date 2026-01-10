@@ -1,92 +1,175 @@
-# OpenEnv Benchmark Deployment
+# OpenEnv Benchmark Scaling Tests
 
-This repo has example for scaling and benchmarking OpenEnv environments on SLURM.
+Scaling and concurrency tests for OpenEnv benchmark environments across multiple deployment types.
 
-## Single node deployment
+## Features
 
-### Run Docker image from HF Space
+- **JSONL + CSV Output**: Per-session raw data and aggregate summaries
+- **2D Grid Sweep**: Test across request counts × wait times with repetitions
+- **Granular Latency**: Connect, reset, step breakdown (not just total)
+- **HTTP vs WebSocket Comparison**: Side-by-side mode analysis
+- **Multi-Infrastructure**: Local, Docker, HF Spaces, SLURM single/multi-node
 
-To run a single environment, you can run the Docker image from the Hugging Face Space.
+## Quick Start
 
-```bash
-docker run -it -p 7860:7860 --platform=linux/amd64 \
-    registry.hf.space/burtenshaw-openenv-benchmark:latest 
-```
-
-### Run uvicorn server locally
-
-Do this before running the deployment script to validate the environment.
+### 1. Install Dependencies
 
 ```bash
-git clone https://huggingface.co/spaces/burtenshaw/openenv-benchmark
-cd openenv-benchmark
-uv venv
-source .venv/bin/activate
-uv pip install -e .
-uv pip install git+https://github.com/meta-pytorch/OpenEnv.git@async-http
-python -m uvicorn server.app:app
+# Core dependencies
+pip install -e .
+
+# With analysis tools (matplotlib for figures)
+pip install -e ".[analysis]"
+
+# Full development setup
+pip install -e ".[all]"
 ```
 
-### SLURM
+### 2. Start a Server
 
 ```bash
-sbatch deploy/serve.sh
+# Local uvicorn
+./deploy/local/run_uvicorn.sh
+
+# Local Docker
+./deploy/local/run_docker.sh
+
+# HF Spaces (see deploy/hf_spaces/README.md)
+./deploy/hf_spaces/deploy.sh
+
+# SLURM single node
+sbatch deploy/slurm/serve_single.sh
+
+# SLURM multi-node with Envoy
+./deploy/slurm/alloc.sh
+./deploy/slurm/serve_multi.sh
 ```
 
-## Distributed deployment with Envoy load balancer
-
-This deploys OpenEnv servers across multiple nodes with Envoy as a load balancer.
-
-### Step 1: Allocate nodes
+### 3. Run Tests
 
 ```bash
-# Default: 4 worker nodes
-./deploy/alloc.sh
+# Basic WebSocket test
+python tests/test_scaling.py --url http://localhost:8000 -n 100
 
-# Or customize:
-WORKERS=8 CPUS_PER_WORKER=32 ./deploy/alloc.sh
+# Compare HTTP vs WebSocket
+python tests/test_scaling.py --url http://localhost:8000 --compare -n 50
+
+# Grid sweep with repetitions
+python tests/test_scaling.py --url http://localhost:8000 \
+    --requests-grid 1,2,4,8,16,32,64 \
+    --wait-grid 0.1,1.0 \
+    --reps 3 \
+    --output-dir results/
+
+# HTTP mode only
+python tests/test_scaling.py --url http://localhost:8000 --mode http -n 100
 ```
 
-### Step 2: Launch the deployment
+## Output Files
 
-Deploy a python virtual environment with uvicorn server on each worker node.
+When using `--output-dir`, the test generates:
+
+### `raw.jsonl` - Per-Session Details
+
+```json
+{"request_id": 0, "mode": "ws", "timestamp": "2025-01-09T12:00:00Z", "wait_requested": 1.0, "connect_latency": 0.012, "reset_latency": 0.005, "step_latency": 1.023, "total_latency": 1.045, "waited_seconds": 1.0, "pid": 12345, "session_hash": "abc123", "host_url": "localhost:8000", "success": true, "error_type": null, "error_message": null}
+```
+
+### `summary.csv` - Aggregate Statistics
+
+| Column | Description |
+|--------|-------------|
+| `mode` | http or ws |
+| `num_requests` | Concurrent requests |
+| `wait_seconds` | Wait time per request |
+| `repetition` | Rep number (1-indexed) |
+| `successful` / `failed` | Request counts |
+| `error_rate` | Failure percentage |
+| `total_wall_time` | Wall clock time for batch |
+| `connect_p50/p95/p99` | Connect latency percentiles |
+| `reset_p50/p95/p99` | Reset latency percentiles |
+| `step_p50/p95/p99` | Step latency percentiles |
+| `total_p50/p90/p95/p99` | Total latency percentiles |
+| `requests_per_second` | Throughput |
+| `effective_concurrency` | N × wait / wall_time |
+| `unique_pids/sessions/hosts` | Distribution metrics |
+
+## CLI Reference
+
+```
+python tests/test_scaling.py [OPTIONS]
+
+Connection:
+  --url, -u URL           Server URL (default: http://localhost:8000)
+  --timeout, -t SECONDS   Request timeout (default: 120)
+
+Test Config:
+  --requests, -n N        Concurrent requests (default: 10)
+  --wait, -w SECONDS      Wait time per request (default: 1.0)
+  --mode, -m {http,ws}    Test mode (default: ws)
+
+Grid Sweep:
+  --requests-grid LIST    Comma-separated request counts (e.g., 1,2,4,8,16)
+  --wait-grid LIST        Comma-separated wait times (e.g., 0.1,1.0)
+  --reps N                Repetitions per config (default: 1)
+
+Comparison:
+  --compare               Run HTTP vs WebSocket comparison
+
+Output:
+  --output-dir, -o DIR    Directory for JSONL/CSV output
+  --verbose, -v           Verbose console output
+```
+
+## Deployment Types
+
+| Type | Command | Scaling |
+|------|---------|---------|
+| Local uvicorn | `./deploy/local/run_uvicorn.sh` | Limited by WORKERS |
+| Local Docker | `./deploy/local/run_docker.sh` | Same as uvicorn |
+| HF Spaces | `./deploy/hf_spaces/deploy.sh` | ~10-20 concurrent |
+| SLURM Single | `sbatch deploy/slurm/serve_single.sh` | cpus-per-task |
+| SLURM Multi | `./deploy/slurm/serve_multi.sh` | nodes × workers |
+
+## HTTP vs WebSocket
+
+| Aspect | HTTP | WebSocket |
+|--------|------|-----------|
+| **Session** | Shared server session | Dedicated per connection |
+| **Concurrency** | Limited by server state | True parallel sessions |
+| **Use case** | Simple requests | Stateful multi-step |
+| **Connect overhead** | Per-request | Once per session |
+
+Use `--compare` to benchmark both modes:
 
 ```bash
-./deploy/run.sh
+python tests/test_scaling.py --url http://localhost:8000 --compare -n 50 --wait 1.0
 ```
 
-Deploy a docker container with uvicorn server on each worker node.
+## Project Structure
 
-```bash
-USE_CONTAINER=true ./deploy/run.sh
-
-# Or with a custom image:
-USE_CONTAINER=true CONTAINER_IMAGE=registry.hf.space/burtenshaw-openenv-benchmark:latest  ./deploy/run.sh
+```
+.
+├── benchmark/                    # OpenEnv benchmark environment
+├── tests/
+│   └── test_scaling.py           # Unified scaling test
+├── deploy/
+│   ├── local/
+│   │   ├── run_uvicorn.sh
+│   │   └── run_docker.sh
+│   ├── hf_spaces/
+│   │   ├── deploy.sh
+│   │   └── README.md
+│   └── slurm/
+│       ├── alloc.sh
+│       ├── serve_single.sh
+│       └── serve_multi.sh
+├── results/                      # Output directory (gitignored)
+├── envoy-config-template.yaml    # Envoy with WebSocket support
+├── pyproject.toml
+└── README.md
 ```
 
-The script will output the Envoy IP address and connection URL:
-```
-========================================
-OpenEnv Benchmark Deployment Ready
-========================================
+## Envoy WebSocket Support
 
-Connection URL:
-  http://<ENVOY_IP>:8000
-
-Health Check: curl http://<ENVOY_IP>:8000/health
-========================================
-```
-
-Connection info is also saved to `openenv-connection.env` for use by other scripts.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WORKERS` | 4 | Number of worker nodes (for alloc.sh) |
-| `CPUS_PER_WORKER` | 2 | CPUs per worker node |
-| `OPENENV_PORT` | 8000 | Port for OpenEnv servers |
-| `ENVOY_PORT` | 8000 | External port for Envoy load balancer |
-| `WORKERS_PER_NODE` | SLURM_CPUS_PER_TASK or 4 | Uvicorn workers per node |
-| `USE_CONTAINER` | false | Deploy using container image |
-| `CONTAINER_IMAGE` | registry.hf.space/burtenshaw-openenv-benchmark:latest | Container image to use |
+The `envoy-config-template.yaml` includes explicit WebSocket upgrade configuration for the `/ws` endpoint, ensuring reliable WebSocket connections through the Envoy load balancer in multi-node deployments.

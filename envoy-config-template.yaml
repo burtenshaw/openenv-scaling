@@ -18,12 +18,25 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: ingress_http
                 codec_type: AUTO
+                # Enable WebSocket upgrades globally
+                upgrade_configs:
+                  - upgrade_type: websocket
                 route_config:
                   name: local_route
                   virtual_hosts:
                     - name: local_service
                       domains: ["*"]
                       routes:
+                        # WebSocket route for /ws endpoint
+                        - match:
+                            prefix: "/ws"
+                          route:
+                            cluster: openenv_cluster
+                            timeout: 300s
+                            upgrade_configs:
+                              - upgrade_type: websocket
+                                enabled: true
+                        # Default route for all other traffic
                         - match:
                             prefix: "/"
                           route:
@@ -51,4 +64,3 @@ static_resources:
           healthy_threshold: 2
           http_health_check:
             path: "/health"
-
