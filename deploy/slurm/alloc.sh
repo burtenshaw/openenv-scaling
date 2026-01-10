@@ -1,3 +1,10 @@
+#!/usr/bin/env bash
+#
+# Allocate SLURM nodes for multi-node deployment
+#
+# Usage:
+#   ./deploy/slurm/alloc.sh
+#   WORKERS=8 ./deploy/slurm/alloc.sh
 
 set -x
 
