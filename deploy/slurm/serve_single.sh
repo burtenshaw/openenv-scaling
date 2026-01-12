@@ -2,8 +2,8 @@
 #SBATCH --job-name=benchmark-env-server
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=100G
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=90G
 #SBATCH --time=02:00:00
 #SBATCH --output=benchmark-env-server_%j.log
 
@@ -14,13 +14,14 @@
 #
 # The server will be available at http://<node-ip>:8000
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="${SCRIPT_DIR}/../.."
+PROJECT_DIR="/fsx/benjamin_burtenshaw/openenv-slurm"
 
 cd "$PROJECT_DIR"
 
-if [[ -f ".venv/bin/activate" ]]; then
-    source .venv/bin/activate
+PYTHON="${PROJECT_DIR}/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "ERROR: Python not found at $PYTHON"
+    exit 1
 fi
 
 echo "========================================"
@@ -29,7 +30,8 @@ echo "========================================"
 echo "Node: $(hostname)"
 echo "Port: 8000"
 echo "Workers: $SLURM_CPUS_PER_TASK"
+echo "Python: $PYTHON"
 echo "========================================"
 
-srun uvicorn benchmark.server.app:app --host 0.0.0.0 --port 8000 --workers $SLURM_CPUS_PER_TASK
+srun "$PYTHON" -m uvicorn benchmark.server.app:app --host 0.0.0.0 --port 8000 --workers $SLURM_CPUS_PER_TASK
 
