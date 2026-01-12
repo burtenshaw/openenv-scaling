@@ -85,10 +85,9 @@ export SLURM_NODE_IP="ip-xx-xx-xx-xx"  # Replace with actual node
 ```bash
 python tests/test_scaling.py \
     --url http://${SLURM_NODE_IP}:8000 \
-    --requests-grid 1,2,4,8,16,32,64,128,256 \
-    --wait-grid 0.1,1.0,5.0 \
+    --requests-grid 32,128,512,2048,4096,8192,16384 \
+    --wait-grid 1.0,5.0,10.0 \
     --reps 3 \
-    --compare \
     --output-dir experiments/results/slurm-single/$(date +%Y-%m-%d)
 ```
 
@@ -142,10 +141,9 @@ curl $OPENENV_URL/health
 source openenv-connection.env
 python tests/test_scaling.py \
     --url $OPENENV_URL \
-    --requests-grid 1,2,4,8,16,32,64,128,256,512 \
-    --wait-grid 0.1,1.0,5.0 \
+    --requests-grid 32,128,512,2048,4096,8192,16384,32768,65536,131072 \
+    --wait-grid 1.0,5.0,10.0 \
     --reps 3 \
-    --compare \
     --output-dir experiments/results/slurm-multi/$(date +%Y-%m-%d)
 ```
 
@@ -266,12 +264,11 @@ WORKERS_PER_NODE=2 ./deploy/slurm/serve_multi.sh
 
 ## Expected Results
 
-| Config | Mode | Max Batch | Notes |
-|--------|------|-----------|-------|
-| Single 64 CPUs | ws | 128-256 | Linear scaling with CPUs |
-| Single 64 CPUs | http | 8-16 | Still limited by shared state |
-| Multi 4×16 CPUs | ws | 256-512 | Scales with nodes |
-| Multi 4×16 CPUs | http | 8-16 | HTTP doesn't benefit from multi-node |
+| Config | Max Batch | Notes |
+|--------|-----------|-------|
+| Single 64 CPUs | 8,192-16,384 | Linear scaling with CPUs |
+| Multi 4×64 CPUs | 32,768-65,536 | Scales with nodes |
+| Multi 8×64 CPUs | 65,536-131,072 | Target 100k+ envs |
 
 ---
 
@@ -280,10 +277,10 @@ WORKERS_PER_NODE=2 ./deploy/slurm/serve_multi.sh
 ```markdown
 ## Run: $(date +%Y-%m-%d)-slurm-{single|multi}
 
-**Infrastructure:** slurm-{single|multi}  
-**Start:** $(date -u +%Y-%m-%dT%H:%M:%SZ)  
-**End:** [fill after completion]  
-**Status:** Complete  
+**Infrastructure:** slurm-{single|multi}
+**Start:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**End:** [fill after completion]
+**Status:** Complete
 
 ### Configuration
 - Nodes: {1 for single, N for multi}
@@ -296,21 +293,29 @@ WORKERS_PER_NODE=2 ./deploy/slurm/serve_multi.sh
 # Server
 {sbatch deploy/slurm/serve_single.sh | ./deploy/slurm/serve_multi.sh}
 
-# Experiment
+# Experiment (single-node)
 python tests/test_scaling.py \
-    --url http://${OPENENV_URL} \
-    --requests-grid 1,2,4,8,16,32,64,128,256 \
-    --wait-grid 0.1,1.0,5.0 \
+    --url http://${SLURM_NODE_IP}:8000 \
+    --requests-grid 32,128,512,2048,4096,8192,16384 \
+    --wait-grid 1.0,5.0,10.0 \
     --reps 3 \
-    --compare \
-    --output-dir experiments/results/slurm-{single|multi}/$(date +%Y-%m-%d)
+    --output-dir experiments/results/slurm-single/$(date +%Y-%m-%d)
+
+# Experiment (multi-node)
+python tests/test_scaling.py \
+    --url $OPENENV_URL \
+    --requests-grid 32,128,512,2048,4096,8192,16384,32768,65536,131072 \
+    --wait-grid 1.0,5.0,10.0 \
+    --reps 3 \
+    --output-dir experiments/results/slurm-multi/$(date +%Y-%m-%d)
 ```
 
 ### Results Summary
-| Mode | wait_s | Max Batch | p99 Latency | Success % | RPS |
-|------|--------|-----------|-------------|-----------|-----|
-| ws   | 0.1    | -         | -           | -         | -   |
-| ...  | ...    | ...       | ...         | ...       | ... |
+| wait_s | Max Batch | p99 Latency | Success % | RPS |
+|--------|-----------|-------------|-----------|-----|
+| 1.0    | -         | -           | -         | -   |
+| 5.0    | -         | -           | -         | -   |
+| 10.0   | -         | -           | -         | -   |
 
 ### Links
 - Raw data: [raw.jsonl](../results/slurm-{single|multi}/$(date +%Y-%m-%d)/raw.jsonl)
