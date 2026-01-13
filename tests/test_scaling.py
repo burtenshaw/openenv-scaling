@@ -8,6 +8,7 @@ Supports both HTTP and WebSocket modes with:
 - Repetitions with statistical aggregation
 - Granular latency breakdown (connect/reset/step)
 - HTTP vs WS comparison mode
+- Multi-node load balancer validation
 
 Usage:
     # Basic test
@@ -20,6 +21,16 @@ Usage:
     # Compare HTTP vs WebSocket
     python tests/test_scaling.py --url http://localhost:8000 \
         --compare -n 50 --wait 1.0
+
+    # Multi-node test with load balancer validation (warns if <2 hosts seen)
+    python tests/test_scaling.py --url $OPENENV_URL \
+        --requests-grid 32,128,512 --wait-grid 1.0 \
+        --expected-hosts 2
+
+    # Strict multi-node validation (fails if <2 hosts seen)
+    python tests/test_scaling.py --url $OPENENV_URL \
+        --requests-grid 32,128,512 --wait-grid 1.0 \
+        --expected-hosts 2 --require-hosts
 
     # Output to files
     python tests/test_scaling.py --url http://localhost:8000 -n 100 \
@@ -179,6 +190,65 @@ def convert_to_ws_url(url: str) -> str:
 def now_iso() -> str:
     """Return current timestamp in ISO format."""
     return datetime.utcnow().isoformat() + "Z"
+
+
+class MultiNodeValidationError(Exception):
+    """Raised when multi-node validation fails."""
+
+    pass
+
+
+def validate_host_distribution(
+    summary: "RunSummary",
+    expected_hosts: int,
+    require: bool = False,
+) -> bool:
+    """
+    Validate that requests were distributed across expected number of hosts.
+
+    Args:
+        summary: The run summary containing unique_hosts count
+        expected_hosts: Expected number of backend hosts
+        require: If True, raise exception on failure; if False, just warn
+
+    Returns:
+        True if validation passed, False otherwise
+
+    Raises:
+        MultiNodeValidationError: If require=True and validation fails
+    """
+    if summary.unique_hosts < expected_hosts:
+        msg = (
+            f"\n{'!' * 70}\n"
+            f"  MULTI-NODE VALIDATION {'FAILED' if require else 'WARNING'}\n"
+            f"{'!' * 70}\n"
+            f"  Expected hosts: {expected_hosts}\n"
+            f"  Actual hosts:   {summary.unique_hosts}\n"
+            f"\n"
+            f"  This indicates the load balancer is NOT distributing traffic!\n"
+            f"  All requests went to a single backend node.\n"
+            f"\n"
+            f"  Troubleshooting steps:\n"
+            f"  1. Verify you're connecting through Envoy, not directly to a worker\n"
+            f"     - Use: source openenv-connection.env && echo $OPENENV_URL\n"
+            f"  2. Check Envoy backend health:\n"
+            f"     - curl http://<envoy-node>:9901/clusters | grep health\n"
+            f"  3. Verify all worker nodes are running:\n"
+            f"     - curl http://<worker-node>:8000/health (for each worker)\n"
+            f"  4. Check Envoy config has all backends:\n"
+            f"     - cat envoy-config-generated.yaml | grep endpoint\n"
+            f"{'!' * 70}\n"
+        )
+        if require:
+            raise MultiNodeValidationError(msg)
+        else:
+            print(msg)
+        return False
+
+    # Validation passed
+    if expected_hosts > 1:
+        print(f"  [OK] Load balancing verified: {summary.unique_hosts} hosts used (expected {expected_hosts})")
+    return True
 
 
 # =============================================================================
@@ -356,10 +426,25 @@ async def run_ws_test(
     wait_seconds: float,
     timeout: float = 120.0,
     hardware: str = "cpu-basic",
+    urls: Optional[List[str]] = None,
 ) -> List[SessionResult]:
-    """Run concurrent WebSocket sessions."""
-    ws_url = convert_to_ws_url(url)
-    tasks = [ws_session(ws_url, i, wait_seconds, timeout) for i in range(num_requests)]
+    """Run concurrent WebSocket sessions.
+
+    If urls is provided (list of multiple URLs), distributes requests round-robin
+    across all URLs to enable multi-node testing without a load balancer.
+    """
+    if urls and len(urls) > 1:
+        # Multi-URL mode: distribute requests round-robin across URLs
+        tasks = []
+        for i in range(num_requests):
+            target_url = urls[i % len(urls)]
+            ws_url = convert_to_ws_url(target_url)
+            tasks.append(ws_session(ws_url, i, wait_seconds, timeout))
+    else:
+        # Single URL mode
+        ws_url = convert_to_ws_url(url)
+        tasks = [ws_session(ws_url, i, wait_seconds, timeout) for i in range(num_requests)]
+
     results = await asyncio.gather(*tasks)
     # Set batch_size and hardware on all results
     for r in results:
@@ -556,16 +641,20 @@ async def run_single_test(
     output_dir: Optional[Path] = None,
     verbose: bool = False,
     hardware: str = "cpu-basic",
+    expected_hosts: int = 1,
+    require_hosts: bool = False,
+    urls: Optional[List[str]] = None,
 ) -> RunSummary:
     """Run a single test configuration."""
-    print(f"\n[{mode.upper()}] N={num_requests}, wait={wait_seconds}s, rep={repetition}")
+    urls_info = f" ({len(urls)} URLs)" if urls and len(urls) > 1 else ""
+    print(f"\n[{mode.upper()}] N={num_requests}, wait={wait_seconds}s, rep={repetition}{urls_info}")
 
     start = time.perf_counter()
 
     if mode == "ws":
         if websockets is None:
             raise ImportError("websockets not installed for ws mode")
-        results = await run_ws_test(url, num_requests, wait_seconds, timeout, hardware)
+        results = await run_ws_test(url, num_requests, wait_seconds, timeout, hardware, urls)
     else:
         results = await run_http_test(url, num_requests, wait_seconds, timeout, hardware)
 
@@ -589,8 +678,13 @@ async def run_single_test(
             f"  -> {summary.successful}/{num_requests} success ({success_pct:.0f}%), "
             f"wall={summary.total_wall_time:.2f}s, "
             f"eff_conc={summary.effective_concurrency:.1f}x, "
-            f"rps={summary.requests_per_second:.1f}"
+            f"rps={summary.requests_per_second:.1f}, "
+            f"hosts={summary.unique_hosts}"
         )
+
+    # Validate multi-node distribution if expected_hosts > 1
+    if expected_hosts > 1:
+        validate_host_distribution(summary, expected_hosts, require_hosts)
 
     return summary
 
@@ -605,6 +699,9 @@ async def run_grid_sweep(
     output_dir: Optional[Path] = None,
     verbose: bool = False,
     hardware: str = "cpu-basic",
+    expected_hosts: int = 1,
+    require_hosts: bool = False,
+    urls: Optional[List[str]] = None,
 ) -> List[RunSummary]:
     """Run 2D grid sweep over requests × wait values with repetitions."""
     all_summaries = []
@@ -618,6 +715,10 @@ async def run_grid_sweep(
     print(f"Requests: {requests_grid}")
     print(f"Wait times: {wait_grid}")
     print(f"Hardware: {hardware}")
+    if urls and len(urls) > 1:
+        print(f"URLs ({len(urls)} nodes): {urls}")
+    if expected_hosts > 1:
+        print(f"Expected hosts: {expected_hosts} (multi-node validation {'STRICT' if require_hosts else 'enabled'})")
 
     for n in requests_grid:
         for w in wait_grid:
@@ -635,6 +736,9 @@ async def run_grid_sweep(
                     repetition=rep,
                     output_dir=output_dir,
                     verbose=verbose,
+                    expected_hosts=expected_hosts,
+                    require_hosts=require_hosts,
+                    urls=urls,
                 )
                 all_summaries.append(summary)
 
@@ -710,6 +814,11 @@ Examples:
 
     # Connection
     parser.add_argument("--url", "-u", default="http://localhost:8000", help="Server URL")
+    parser.add_argument(
+        "--urls",
+        type=str,
+        help="Comma-separated list of URLs for multi-node testing without load balancer (e.g., http://node1:8000,http://node2:8000). Requests are distributed round-robin.",
+    )
     parser.add_argument("--timeout", "-t", type=float, default=120.0, help="Timeout per request")
 
     # Test config
@@ -740,6 +849,19 @@ Examples:
         help="Hardware tier for results metadata (cpu-basic, cpu-upgrade, t4-small, a10g-small, etc.)",
     )
 
+    # Multi-node validation
+    parser.add_argument(
+        "--expected-hosts",
+        type=int,
+        default=1,
+        help="Expected number of backend hosts (for multi-node validation). If actual hosts < expected, prints warning.",
+    )
+    parser.add_argument(
+        "--require-hosts",
+        action="store_true",
+        help="Fail the experiment if unique_hosts < expected-hosts (strict multi-node validation)",
+    )
+
     # Output
     parser.add_argument("--output-dir", "-o", type=str, help="Directory for JSONL/CSV output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
@@ -754,6 +876,15 @@ Examples:
 
     url = args.url.rstrip("/")
     output_dir = Path(args.output_dir) if args.output_dir else None
+
+    # Parse multiple URLs if provided
+    urls = None
+    if args.urls:
+        urls = [u.strip().rstrip("/") for u in args.urls.split(",")]
+        url = urls[0]  # Use first URL as the primary
+        print(f"\nMulti-node mode: distributing requests across {len(urls)} URLs")
+        for i, u in enumerate(urls):
+            print(f"  [{i+1}] {u}")
 
     # Determine test mode
     if args.compare:
@@ -775,19 +906,22 @@ Examples:
             output_dir=output_dir,
             verbose=args.verbose,
             hardware=args.hardware,
+            expected_hosts=args.expected_hosts,
+            require_hosts=args.require_hosts,
+            urls=urls,
         )
 
         # Print final summary table
-        print(f"\n{'=' * 70}")
+        print(f"\n{'=' * 80}")
         print("  Grid Sweep Complete")
-        print(f"{'=' * 70}")
-        print(f"\n  {'N':>6} {'Wait':>8} {'Rep':>4} {'Success':>8} {'Wall(s)':>10} {'RPS':>8} {'Eff.Conc':>10}")
-        print(f"  {'-' * 6} {'-' * 8} {'-' * 4} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 10}")
+        print(f"{'=' * 80}")
+        print(f"\n  {'N':>6} {'Wait':>8} {'Rep':>4} {'Success':>8} {'Wall(s)':>10} {'RPS':>8} {'Eff.Conc':>10} {'Hosts':>6}")
+        print(f"  {'-' * 6} {'-' * 8} {'-' * 4} {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 6}")
         for s in summaries:
             print(
                 f"  {s.num_requests:>6} {s.wait_seconds:>8.2f} {s.repetition:>4} "
                 f"{s.successful:>8} {s.total_wall_time:>10.2f} "
-                f"{s.requests_per_second:>8.1f} {s.effective_concurrency:>10.1f}"
+                f"{s.requests_per_second:>8.1f} {s.effective_concurrency:>10.1f} {s.unique_hosts:>6}"
             )
 
         if output_dir:
@@ -804,6 +938,9 @@ Examples:
             output_dir=output_dir,
             verbose=True,
             hardware=args.hardware,
+            expected_hosts=args.expected_hosts,
+            require_hosts=args.require_hosts,
+            urls=urls,
         )
 
         if output_dir:

@@ -31,5 +31,11 @@ echo "Workers: $WORKERS"
 echo "Max Concurrent Envs: $MAX_CONCURRENT_ENVS"
 echo "========================================"
 
-uvicorn benchmark.server.app:app --host "$HOST" --port "$PORT" --workers "$WORKERS"
+git clone https://huggingface.co/spaces/burtenshaw/openenv-benchmark
+cd openenv-benchmark
+pip install -e .
+uv run server
 
+# uvicorn benchmark.server.app:app --host "$HOST" --port "$PORT" --workers "$WORKERS"
+
+# uv run --isolated --project https://huggingface.co/spaces/burtenshaw/openenv-benchmark server
