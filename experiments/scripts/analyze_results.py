@@ -249,48 +249,59 @@ def generate_results_summary(
     return "\n".join(lines)
 
 
+# Core counts for each infrastructure (for per-core metrics)
+INFRA_CORES = {
+    "local-uvicorn": 8,
+    "local-docker": 8,
+    "hf-spaces": 2,
+    "slurm-single": 48,
+    "slurm-multi": 96,
+}
+
+
 def plot_scaling_curves(
     results: Dict[str, List[Dict]],
     output_dir: Path,
     wait_seconds: float = 1.0,
 ):
-    """Generate Figure 2: Scaling Curves."""
+    """Generate Figure 2: Scaling Curves (WebSocket only)."""
     if not HAS_MATPLOTLIB:
         print("Warning: matplotlib not installed, skipping figure generation")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
-    for ax, mode in zip(axes, ["ws", "http"]):
-        for infra_id, data in sorted(results.items()):
-            # Filter data
-            filtered = [
-                row for row in data if row.get("mode") == mode and abs(row.get("wait_seconds", 0) - wait_seconds) < 0.01
-            ]
+    for infra_id, data in sorted(results.items()):
+        # Filter data - WebSocket only
+        filtered = [
+            row for row in data if row.get("mode") == "ws" and abs(row.get("wait_seconds", 0) - wait_seconds) < 0.01
+        ]
 
-            if not filtered:
-                continue
+        if not filtered:
+            continue
 
-            # Group by batch size and average
-            batch_stats = defaultdict(list)
-            for row in filtered:
-                batch_size = row.get("num_requests", 0)
-                success_rate = (1 - row.get("error_rate", 0)) * 100
-                batch_stats[batch_size].append(success_rate)
+        # Group by batch size and average
+        batch_stats = defaultdict(list)
+        for row in filtered:
+            batch_size = row.get("num_requests", 0)
+            success_rate = (1 - row.get("error_rate", 0)) * 100
+            batch_stats[batch_size].append(success_rate)
 
-            x = sorted(batch_stats.keys())
-            y = [sum(batch_stats[b]) / len(batch_stats[b]) for b in x]
+        x = sorted(batch_stats.keys())
+        y = [sum(batch_stats[b]) / len(batch_stats[b]) for b in x]
 
-            ax.plot(x, y, marker="o", label=infra_id)
+        ax.plot(x, y, marker="o", label=infra_id, linewidth=2, markersize=6)
 
-        ax.axhline(y=95, color="r", linestyle="--", alpha=0.5, label="95% threshold")
-        ax.set_xlabel("Batch Size")
-        ax.set_ylabel("Success Rate (%)")
-        ax.set_title(f"{mode.upper()} Mode (wait={wait_seconds}s)")
-        ax.set_xscale("log", base=2)
-        ax.set_ylim(0, 105)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+    ax.axhline(y=95, color="r", linestyle="--", alpha=0.5, label="95% threshold")
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel("Success Rate (%)")
+    ax.set_title(f"WebSocket Scaling Curves (wait={wait_seconds}s)")
+    ax.set_xscale("log", base=2)
+    ax.set_ylim(0, 105)
+    # Use integer tick labels
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{int(x):,}"))
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     output_path = output_dir / "scaling_curves.png"
@@ -304,40 +315,41 @@ def plot_max_batch_comparison(
     output_dir: Path,
     success_threshold: float = 0.95,
 ):
-    """Generate Figure 1: Max Batch Size Comparison."""
+    """Generate Figure 1: Max Batch Size Comparison (WebSocket only)."""
     if not HAS_MATPLOTLIB:
         return
 
-    wait_times = [0.1, 1.0, 5.0]
+    wait_times = [1.0, 5.0, 10.0]
     infrastructures = sorted(results.keys())
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     for ax, wait in zip(axes, wait_times):
         ws_values = []
-        http_values = []
 
         for infra in infrastructures:
             ws_max, _ = compute_max_batch_size(results[infra], "ws", wait, success_threshold)
-            http_max, _ = compute_max_batch_size(results[infra], "http", wait, success_threshold)
             ws_values.append(ws_max or 0)
-            http_values.append(http_max or 0)
 
         x = range(len(infrastructures))
-        width = 0.35
 
-        ax.bar([i - width / 2 for i in x], ws_values, width, label="WebSocket", color="steelblue")
-        ax.bar([i + width / 2 for i in x], http_values, width, label="HTTP", color="coral")
+        bars = ax.bar(x, ws_values, color="steelblue", edgecolor="black")
+
+        # Add value labels on bars
+        for bar, val in zip(bars, ws_values):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 20,
+                       f"{int(val):,}", ha='center', va='bottom', fontsize=9)
 
         ax.set_xlabel("Infrastructure")
         ax.set_ylabel("Max Batch Size")
         ax.set_title(f"wait={wait}s")
         ax.set_xticks(x)
         ax.set_xticklabels([i.replace("-", "\n") for i in infrastructures], fontsize=8)
-        ax.legend()
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{int(x):,}"))
         ax.grid(True, axis="y", alpha=0.3)
 
-    plt.suptitle("Maximum Batch Size by Infrastructure and Protocol", fontsize=14)
+    plt.suptitle("Maximum Batch Size by Infrastructure (WebSocket)", fontsize=14)
     plt.tight_layout()
     output_path = output_dir / "max_batch_comparison.png"
     plt.savefig(output_path, dpi=150)
@@ -348,17 +360,16 @@ def plot_max_batch_comparison(
 def plot_latency_heatmap(
     results: Dict[str, List[Dict]],
     output_dir: Path,
-    mode: str = "ws",
 ):
-    """Generate Figure 4: Latency Heatmap."""
+    """Generate Figure 4: Latency Heatmap (WebSocket only)."""
     if not HAS_MATPLOTLIB:
         return
 
-    # Collect all batch sizes
+    # Collect all batch sizes (WS only)
     all_batch_sizes = set()
     for data in results.values():
         for row in data:
-            if row.get("mode") == mode:
+            if row.get("mode") == "ws":
                 all_batch_sizes.add(row.get("num_requests", 0))
 
     batch_sizes = sorted(all_batch_sizes)
@@ -371,11 +382,11 @@ def plot_latency_heatmap(
         data = results[infra]
 
         for batch in batch_sizes:
-            # Find matching row (wait=1.0s)
+            # Find matching row (wait=1.0s, WS only)
             matching = [
                 r
                 for r in data
-                if r.get("mode") == mode
+                if r.get("mode") == "ws"
                 and r.get("num_requests") == batch
                 and abs(r.get("wait_seconds", 0) - 1.0) < 0.01
             ]
@@ -397,19 +408,79 @@ def plot_latency_heatmap(
     im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd")
 
     ax.set_xticks(range(len(batch_sizes)))
-    ax.set_xticklabels(batch_sizes)
+    ax.set_xticklabels([f"{int(b):,}" for b in batch_sizes], rotation=45, ha="right")
     ax.set_yticks(range(len(infrastructures)))
     ax.set_yticklabels(infrastructures)
 
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("Infrastructure")
-    ax.set_title(f"P99 Latency Heatmap ({mode.upper()} mode, wait=1.0s)")
+    ax.set_title("P99 Latency Heatmap (WebSocket, wait=1.0s)")
 
     cbar = plt.colorbar(im)
     cbar.set_label("P99 Latency (seconds)")
 
     plt.tight_layout()
     output_path = output_dir / "latency_heatmap.png"
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def plot_batch_per_core(
+    results: Dict[str, List[Dict]],
+    output_dir: Path,
+    success_threshold: float = 0.95,
+):
+    """Generate Figure: Batch Size Per Core comparison."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    wait_seconds = 1.0
+    infrastructures = sorted(results.keys())
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    batch_per_core = []
+    colors = []
+
+    for infra in infrastructures:
+        ws_max, _ = compute_max_batch_size(results[infra], "ws", wait_seconds, success_threshold)
+        cores = INFRA_CORES.get(infra, 1)
+
+        if ws_max:
+            bpc = ws_max / cores
+            batch_per_core.append(bpc)
+        else:
+            batch_per_core.append(0)
+
+        # Color by infrastructure type
+        if "slurm" in infra:
+            colors.append("forestgreen")
+        elif "hf" in infra:
+            colors.append("coral")
+        else:
+            colors.append("steelblue")
+
+    x = range(len(infrastructures))
+    bars = ax.bar(x, batch_per_core, color=colors, edgecolor="black")
+
+    # Add value labels on bars
+    for bar, val, infra in zip(bars, batch_per_core, infrastructures):
+        cores = INFRA_CORES.get(infra, 1)
+        if val > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                   f"{val:.1f}\n({cores} cores)", ha='center', va='bottom', fontsize=9)
+
+    ax.set_xlabel("Infrastructure")
+    ax.set_ylabel("Max Batch Size Per Core")
+    ax.set_title(f"Scaling Efficiency: Batch Size Per Core (wait={wait_seconds}s, 95% success)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([i.replace("-", "\n") for i in infrastructures], fontsize=9)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:.0f}"))
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    output_path = output_dir / "batch_per_core.png"
     plt.savefig(output_path, dpi=150)
     plt.close()
     print(f"Saved: {output_path}")
@@ -523,6 +594,7 @@ def main():
             plot_max_batch_comparison(results, output_dir, args.success_threshold)
             plot_scaling_curves(results, output_dir)
             plot_latency_heatmap(results, output_dir)
+            plot_batch_per_core(results, output_dir, args.success_threshold)
             print(f"\nFigures saved to: {output_dir}")
         else:
             print("\nWarning: matplotlib not installed, skipping figures")
